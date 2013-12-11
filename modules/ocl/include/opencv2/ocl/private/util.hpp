@@ -25,7 +25,7 @@
 //
 //   * Redistribution's in binary form must reproduce the above copyright notice,
 //     this list of conditions and the following disclaimer in the documentation
-//     and/or other oclMaterials provided with the distribution.
+//     and/or other materials provided with the distribution.
 //
 //   * The name of the copyright holders may not be used to endorse or promote products
 //     derived from this software without specific prior written permission.
@@ -47,6 +47,7 @@
 #define __OPENCV_OCL_PRIVATE_UTIL__
 
 #include "opencv2/ocl/cl_runtime/cl_runtime.hpp"
+#include "opencv2/core/ocl_genbase.hpp"
 
 #include "opencv2/ocl.hpp"
 
@@ -54,13 +55,6 @@ namespace cv
 {
 namespace ocl
 {
-
-struct ProgramEntry
-{
-    const char* name;
-    const char* programStr;
-    const char* programHash;
-};
 
 inline cl_device_id getClDeviceID(const Context *ctx)
 {
@@ -103,7 +97,11 @@ CV_EXPORTS cl_kernel openCLGetKernelFromSource(const Context *clCxt,
         const cv::ocl::ProgramEntry* source, String kernelName);
 CV_EXPORTS cl_kernel openCLGetKernelFromSource(const Context *clCxt,
         const cv::ocl::ProgramEntry* source, String kernelName, const char *build_options);
+CV_EXPORTS cl_kernel openCLGetKernelFromSource(Context *ctx, const cv::ocl::ProgramEntry* source,
+        String kernelName, int channels, int depth, const char *build_options);
 CV_EXPORTS void openCLVerifyKernel(const Context *clCxt, cl_kernel kernel, size_t *localThreads);
+CV_EXPORTS void openCLExecuteKernel(Context *ctx, cl_kernel kernel, size_t globalThreads[3],
+                          size_t localThreads[3], std::vector< std::pair<size_t, const void *> > &args);
 CV_EXPORTS void openCLExecuteKernel(Context *clCxt , const cv::ocl::ProgramEntry* source, String kernelName, std::vector< std::pair<size_t, const void *> > &args,
         int globalcols , int globalrows, size_t blockSize = 16, int kernel_expand_depth = -1, int kernel_expand_channel = -1);
 CV_EXPORTS void openCLExecuteKernel_(Context *clCxt, const cv::ocl::ProgramEntry* source, String kernelName,

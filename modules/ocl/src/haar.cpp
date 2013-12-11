@@ -29,7 +29,7 @@
 //
 //   * Redistribution's in binary form must reproduce the above copyright notice,
 //     this list of conditions and the following disclaimer in the documentation
-//     and/or other oclMaterials provided with the distribution.
+//     and/or other materials provided with the distribution.
 //
 //   * The name of the copyright holders may not be used to endorse or promote products
 //     derived from this software without specific prior written permission.
@@ -747,6 +747,15 @@ void OclCascadeClassifier::detectMultiScale(oclMat &gimg, CV_OUT std::vector<cv:
         oclMat gsum(totalheight + 4, gimg.cols + 1, CV_32SC1);
         oclMat gsqsum(totalheight + 4, gimg.cols + 1, CV_32FC1);
 
+        int sdepth = 0;
+        if(Context::getContext()->supportsFeature(FEATURE_CL_DOUBLE))
+            sdepth = CV_64FC1;
+        else
+            sdepth = CV_32FC1;
+        sdepth = CV_MAT_DEPTH(sdepth);
+        int type = CV_MAKE_TYPE(sdepth, 1);
+        oclMat gsqsum_t(totalheight + 4, gimg.cols + 1, type);
+
         cl_mem stagebuffer;
         cl_mem nodebuffer;
         cl_mem candidatebuffer;
@@ -754,6 +763,7 @@ void OclCascadeClassifier::detectMultiScale(oclMat &gimg, CV_OUT std::vector<cv:
         cv::Rect roi, roi2;
         cv::Mat imgroi, imgroisq;
         cv::ocl::oclMat resizeroi, gimgroi, gimgroisq;
+
         int grp_per_CU = 12;
 
         size_t blocksize = 8;
@@ -773,7 +783,7 @@ void OclCascadeClassifier::detectMultiScale(oclMat &gimg, CV_OUT std::vector<cv:
             roi2 = Rect(0, 0, sz.width - 1, sz.height - 1);
             resizeroi = gimg1(roi2);
             gimgroi = gsum(roi);
-            gimgroisq = gsqsum(roi);
+            gimgroisq = gsqsum_t(roi);
             int width = gimgroi.cols - 1 - cascade->orig_window_size.width;
             int height = gimgroi.rows - 1 - cascade->orig_window_size.height;
             scaleinfo[i].width_height = (width << 16) | height;
@@ -787,8 +797,13 @@ void OclCascadeClassifier::detectMultiScale(oclMat &gimg, CV_OUT std::vector<cv:
             scaleinfo[i].factor = factor;
             cv::ocl::resize(gimg, resizeroi, Size(sz.width - 1, sz.height - 1), 0, 0, INTER_LINEAR);
             cv::ocl::integral(resizeroi, gimgroi, gimgroisq);
+
             indexy += sz.height;
         }
+        if(gsqsum_t.depth() == CV_64F)
+            gsqsum_t.convertTo(gsqsum, CV_32FC1);
+        else
+            gsqsum = gsqsum_t;
 
         gcascade   = (GpuHidHaarClassifierCascade *)cascade->hid_cascade;
         stage      = (GpuHidHaarStageClassifier *)(gcascade + 1);
@@ -849,16 +864,138 @@ void OclCascadeClassifier::detectMultiScale(oclMat &gimg, CV_OUT std::vector<cv:
         args.push_back ( std::make_pair(sizeof(cl_int4) , (void *)&pq ));
         args.push_back ( std::make_pair(sizeof(cl_float) , (void *)&correction ));
 
-        const char * build_options = gcascade->is_stump_based ? "-D STUMP_BASED=1" : "-D STUMP_BASED=0";
+        if(gcascade->is_stump_based && gsum.clCxt->supportsFeature(FEATURE_CL_INTEL_DEVICE))
+        {
+            //setup local group size
+            localThreads[0] = 8;
+            localThreads[1] = 16;
+            localThreads[2] = 1;
 
-        openCLExecuteKernel(gsum.clCxt, &haarobjectdetect, "gpuRunHaarClassifierCascade", globalThreads, localThreads, args, -1, -1, build_options);
+            //init maximal number of workgroups
+            int WGNumX = 1+(sizev[0].width /(localThreads[0]));
+            int WGNumY = 1+(sizev[0].height/(localThreads[1]));
+            int WGNumZ = loopcount;
+            int WGNum = 0; //accurate number of non -empty workgroups
+            oclMat      oclWGInfo(1,sizeof(cl_int4) * WGNumX*WGNumY*WGNumZ,CV_8U);
+            {
+                cl_int4*    pWGInfo = (cl_int4*)clEnqueueMapBuffer(getClCommandQueue(oclWGInfo.clCxt),(cl_mem)oclWGInfo.datastart,true,CL_MAP_WRITE, 0, oclWGInfo.step, 0,0,0,&status);
+                openCLVerifyCall(status);
+                for(int z=0;z<WGNumZ;++z)
+                {
+                    int     Width  = (scaleinfo[z].width_height >> 16)&0xFFFF;
+                    int     Height = (scaleinfo[z].width_height >> 0 )& 0xFFFF;
+                    for(int y=0;y<WGNumY;++y)
+                    {
+                        int     gy = y*localThreads[1];
+                        if(gy>=(Height-cascade->orig_window_size.height))
+                            continue; // no data to process
+                        for(int x=0;x<WGNumX;++x)
+                        {
+                            int     gx = x*localThreads[0];
+                            if(gx>=(Width-cascade->orig_window_size.width))
+                                continue; // no data to process
 
-        openCLReadBuffer( gsum.clCxt, candidatebuffer, candidate, 4 * sizeof(int)*outputsz );
+                            // save no-empty workgroup info into array
+                            pWGInfo[WGNum].s[0] = scaleinfo[z].width_height;
+                            pWGInfo[WGNum].s[1] = (gx << 16) | gy;
+                            pWGInfo[WGNum].s[2] = scaleinfo[z].imgoff;
+                            memcpy(&(pWGInfo[WGNum].s[3]),&(scaleinfo[z].factor),sizeof(float));
+                            WGNum++;
+                        }
+                    }
+                }
+                openCLSafeCall(clEnqueueUnmapMemObject(getClCommandQueue(oclWGInfo.clCxt),(cl_mem)oclWGInfo.datastart,pWGInfo,0,0,0));
+                pWGInfo = NULL;
+            }
 
-        for(int i = 0; i < outputsz; i++)
-            if(candidate[4 * i + 2] != 0)
-                allCandidates.push_back(Rect(candidate[4 * i], candidate[4 * i + 1],
-                candidate[4 * i + 2], candidate[4 * i + 3]));
+            // setup global sizes to have linear array of workgroups with WGNum size
+            globalThreads[0] = localThreads[0]*WGNum;
+            globalThreads[1] = localThreads[1];
+            globalThreads[2] = 1;
+
+#define NODE_SIZE 12
+            // pack node info to have less memory loads
+            oclMat  oclNodesPK(1,sizeof(cl_int) * NODE_SIZE * nodenum,CV_8U);
+            {
+                cl_int  status;
+                cl_int* pNodesPK = (cl_int*)clEnqueueMapBuffer(getClCommandQueue(oclNodesPK.clCxt),(cl_mem)oclNodesPK.datastart,true,CL_MAP_WRITE, 0, oclNodesPK.step, 0,0,0,&status);
+                openCLVerifyCall(status);
+                //use known local data stride to precalulate indexes
+                int DATA_SIZE_X = (localThreads[0]+cascade->orig_window_size.width);
+                // check that maximal value is less than maximal unsigned short
+                assert(DATA_SIZE_X*cascade->orig_window_size.height+cascade->orig_window_size.width < (int)USHRT_MAX);
+                for(int i = 0;i<nodenum;++i)
+                {//process each node from classifier
+                    struct NodePK
+                    {
+                        unsigned short  slm_index[3][4];
+                        float           weight[3];
+                        float           threshold;
+                        float           alpha[2];
+                    };
+                    struct NodePK * pOut = (struct NodePK *)(pNodesPK + NODE_SIZE*i);
+                    for(int k=0;k<3;++k)
+                    {// calc 4 short indexes in shared local mem for each rectangle instead of 2 (x,y) pair.
+                        int* p = &(node[i].p[k][0]);
+                        pOut->slm_index[k][0] = (unsigned short)(p[1]*DATA_SIZE_X+p[0]);
+                        pOut->slm_index[k][1] = (unsigned short)(p[1]*DATA_SIZE_X+p[2]);
+                        pOut->slm_index[k][2] = (unsigned short)(p[3]*DATA_SIZE_X+p[0]);
+                        pOut->slm_index[k][3] = (unsigned short)(p[3]*DATA_SIZE_X+p[2]);
+                    }
+                    //store used float point values for each node
+                    pOut->weight[0] = node[i].weight[0];
+                    pOut->weight[1] = node[i].weight[1];
+                    pOut->weight[2] = node[i].weight[2];
+                    pOut->threshold = node[i].threshold;
+                    pOut->alpha[0] = node[i].alpha[0];
+                   pOut->alpha[1] = node[i].alpha[1];
+                }
+                openCLSafeCall(clEnqueueUnmapMemObject(getClCommandQueue(oclNodesPK.clCxt),(cl_mem)oclNodesPK.datastart,pNodesPK,0,0,0));
+                pNodesPK = NULL;
+            }
+            // add 2 additional buffers (WGinfo and packed nodes) as 2 last args
+            args.push_back ( std::make_pair(sizeof(cl_mem) , (void *)&oclNodesPK.datastart ));
+            args.push_back ( std::make_pair(sizeof(cl_mem) , (void *)&oclWGInfo.datastart ));
+
+            //form build options for kernel
+            String  options = "-D PACKED_CLASSIFIER";
+            options += format(" -D NODE_SIZE=%d",NODE_SIZE);
+            options += format(" -D WND_SIZE_X=%d",cascade->orig_window_size.width);
+            options += format(" -D WND_SIZE_Y=%d",cascade->orig_window_size.height);
+            options += format(" -D STUMP_BASED=%d",gcascade->is_stump_based);
+            options += format(" -D LSx=%d",localThreads[0]);
+            options += format(" -D LSy=%d",localThreads[1]);
+            options += format(" -D SPLITNODE=%d",splitnode);
+            options += format(" -D SPLITSTAGE=%d",splitstage);
+            options += format(" -D OUTPUTSZ=%d",outputsz);
+
+            // init candiate global count by 0
+            int pattern = 0;
+            openCLSafeCall(clEnqueueWriteBuffer(qu, candidatebuffer, 1, 0, 1 * sizeof(pattern),&pattern, 0, NULL, NULL));
+            // execute face detector
+            openCLExecuteKernel(gsum.clCxt, &haarobjectdetect, "gpuRunHaarClassifierCascadePacked", globalThreads, localThreads, args, -1, -1, options.c_str());
+            //read candidate buffer back and put it into host list
+            openCLReadBuffer( gsum.clCxt, candidatebuffer, candidate, 4 * sizeof(int)*outputsz );
+            assert(candidate[0]<outputsz);
+            //printf("candidate[0]=%d\n",candidate[0]);
+            for(int i = 1; i <= candidate[0]; i++)
+            {
+                allCandidates.push_back(Rect(candidate[4 * i], candidate[4 * i + 1],candidate[4 * i + 2], candidate[4 * i + 3]));
+            }
+        }
+        else
+        {
+            const char * build_options = gcascade->is_stump_based ? "-D STUMP_BASED=1" : "-D STUMP_BASED=0";
+
+            openCLExecuteKernel(gsum.clCxt, &haarobjectdetect, "gpuRunHaarClassifierCascade", globalThreads, localThreads, args, -1, -1, build_options);
+
+            openCLReadBuffer( gsum.clCxt, candidatebuffer, candidate, 4 * sizeof(int)*outputsz );
+
+            for(int i = 0; i < outputsz; i++)
+                if(candidate[4 * i + 2] != 0)
+                    allCandidates.push_back(Rect(candidate[4 * i], candidate[4 * i + 1],
+                    candidate[4 * i + 2], candidate[4 * i + 3]));
+        }
 
         free(scaleinfo);
         free(candidate);
@@ -874,7 +1011,12 @@ void OclCascadeClassifier::detectMultiScale(oclMat &gimg, CV_OUT std::vector<cv:
         int n_factors = 0;
         oclMat gsum;
         oclMat gsqsum;
-        cv::ocl::integral(gimg, gsum, gsqsum);
+        oclMat gsqsum_t;
+        cv::ocl::integral(gimg, gsum, gsqsum_t);
+        if(gsqsum_t.depth() == CV_64F)
+            gsqsum_t.convertTo(gsqsum, CV_32FC1);
+        else
+            gsqsum = gsqsum_t;
         CvSize sz;
         std::vector<CvSize> sizev;
         std::vector<float> scalev;
@@ -934,11 +1076,11 @@ void OclCascadeClassifier::detectMultiScale(oclMat &gimg, CV_OUT std::vector<cv:
         {
             sz = sizev[i];
             factor = scalev[i];
-            int ystep = cvRound(std::max(2., factor));
-            int equRect_x = (int)(factor * gcascade->p0 + 0.5);
-            int equRect_y = (int)(factor * gcascade->p1 + 0.5);
-            int equRect_w = (int)(factor * gcascade->p3 + 0.5);
-            int equRect_h = (int)(factor * gcascade->p2 + 0.5);
+            double ystep = std::max(2., factor);
+            int equRect_x = cvRound(factor * gcascade->p0);
+            int equRect_y = cvRound(factor * gcascade->p1);
+            int equRect_w = cvRound(factor * gcascade->p3);
+            int equRect_h = cvRound(factor * gcascade->p2);
             p[i].s[0] = equRect_x;
             p[i].s[1] = equRect_y;
             p[i].s[2] = equRect_x + equRect_w;

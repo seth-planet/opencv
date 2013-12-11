@@ -27,7 +27,7 @@
 //
 //   * Redistribution's in binary form must reproduce the above copyright notice,
 //     this list of conditions and the following disclaimer in the documentation
-//     and/or other oclMaterials provided with the distribution.
+//     and/or other materials provided with the distribution.
 //
 //   * The name of the copyright holders may not be used to endorse or promote products
 //     derived from this software without specific prior written permission.
@@ -85,10 +85,15 @@ static void convert_C3C4(const cl_mem &src, oclMat &dst)
     args.push_back( std::make_pair( sizeof(cl_int), (void *)&pixel_end));
 
     size_t globalThreads[3] = { divUp(dst.wholecols * dst.wholerows, 4), 1, 1 };
-    size_t localThreads[3] = { 256, 1, 1 };
 
+#ifdef ANDROID
+    openCLExecuteKernel(clCxt, &convertC3C4, "convertC3C4", globalThreads, NULL,
+                        args, -1, -1, buildOptions.c_str());
+#else
+    size_t localThreads[3] = { 256, 1, 1 };
     openCLExecuteKernel(clCxt, &convertC3C4, "convertC3C4", globalThreads, localThreads,
                         args, -1, -1, buildOptions.c_str());
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -112,9 +117,13 @@ static void convert_C4C3(const oclMat &src, cl_mem &dst)
     args.push_back( std::make_pair( sizeof(cl_int), (void *)&pixel_end));
 
     size_t globalThreads[3] = { divUp(src.wholecols * src.wholerows, 4), 1, 1};
-    size_t localThreads[3] = { 256, 1, 1 };
 
+#ifdef ANDROID
+    openCLExecuteKernel(clCxt, &convertC3C4, "convertC4C3", globalThreads, NULL, args, -1, -1, buildOptions.c_str());
+#else
+    size_t localThreads[3] = { 256, 1, 1};
     openCLExecuteKernel(clCxt, &convertC3C4, "convertC4C3", globalThreads, localThreads, args, -1, -1, buildOptions.c_str());
+#endif
 }
 
 void cv::ocl::oclMat::upload(const Mat &m)
@@ -154,30 +163,24 @@ void cv::ocl::oclMat::upload(const Mat &m)
 
 cv::ocl::oclMat::operator cv::_InputArray()
 {
-    _InputArray newInputArray;
-    newInputArray.flags = cv::_InputArray::OCL_MAT;
-    newInputArray.obj   = reinterpret_cast<void *>(this);
-    return newInputArray;
+    return _InputArray(cv::_InputArray::OCL_MAT, this);
 }
 
 cv::ocl::oclMat::operator cv::_OutputArray()
 {
-    _OutputArray newOutputArray;
-    newOutputArray.flags = cv::_InputArray::OCL_MAT;
-    newOutputArray.obj   = reinterpret_cast<void *>(this);
-    return newOutputArray;
+    return _OutputArray(cv::_InputArray::OCL_MAT, this);
 }
 
 cv::ocl::oclMat& cv::ocl::getOclMatRef(InputArray src)
 {
-    CV_Assert(src.flags & cv::_InputArray::OCL_MAT);
-    return *reinterpret_cast<oclMat*>(src.obj);
+    CV_Assert(src.kind() == cv::_InputArray::OCL_MAT);
+    return *(oclMat*)src.getObj();
 }
 
 cv::ocl::oclMat& cv::ocl::getOclMatRef(OutputArray src)
 {
-    CV_Assert(src.flags & cv::_InputArray::OCL_MAT);
-    return *reinterpret_cast<oclMat*>(src.obj);
+    CV_Assert(src.kind() == cv::_InputArray::OCL_MAT);
+    return *(oclMat*)src.getObj();
 }
 
 void cv::ocl::oclMat::download(cv::Mat &m) const

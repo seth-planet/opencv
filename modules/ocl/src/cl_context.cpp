@@ -27,7 +27,7 @@
 //
 //   * Redistribution's in binary form must reproduce the above copyright notice,
 //     this list of conditions and the following disclaimer in the documentation
-//     and/or other oclMaterials provided with the distribution.
+//     and/or other materials provided with the distribution.
 //
 //   * The name of the copyright holders may not be used to endorse or promote products
 //     derived from this software without specific prior written permission.
@@ -46,6 +46,8 @@
 //M*/
 
 #include "precomp.hpp"
+#include <stdlib.h>
+#include <ctype.h>
 #include <iomanip>
 #include <fstream>
 #include "cl_programcache.hpp"
@@ -187,11 +189,8 @@ static bool parseOpenCLDeviceConfiguration(const std::string& configurationStr,
     return true;
 }
 
-static bool __deviceSelected = false;
 static bool selectOpenCLDevice()
 {
-    __deviceSelected = true;
-
     std::string platform;
     std::vector<std::string> deviceTypes;
     std::string deviceName;
@@ -448,6 +447,17 @@ static int initializeOpenCLDevices()
                 {
                     deviceInfo.info.haveDoubleSupport = false;
                 }
+
+                size_t intel_platform = platformInfo.info.platformVendor.find("Intel");
+                if(intel_platform != std::string::npos)
+                {
+                    deviceInfo.info.compilationExtraOptions += " -D INTEL_DEVICE";
+                    deviceInfo.info.isIntelDevice = true;
+                }
+                else
+                {
+                    deviceInfo.info.isIntelDevice = false;
+                }
             }
         }
     }
@@ -471,7 +481,7 @@ DeviceInfo::DeviceInfo()
       deviceVendorId(-1),
       maxWorkGroupSize(0), maxComputeUnits(0), localMemorySize(0), maxMemAllocSize(0),
       deviceVersionMajor(0), deviceVersionMinor(0),
-      haveDoubleSupport(false), isUnifiedMemory(false),
+      haveDoubleSupport(false), isUnifiedMemory(false),isIntelDevice(false),
       platform(NULL)
 {
     // nothing
@@ -515,26 +525,38 @@ private:
 
 static ContextImpl* currentContext = NULL;
 
+static bool __deviceSelected = false;
+
 Context* Context::getContext()
 {
     if (currentContext == NULL)
     {
-        if (!__initialized || !__deviceSelected)
+        static bool defaultInitiaization = false;
+        if (!defaultInitiaization)
         {
             cv::AutoLock lock(getInitializationMutex());
-            if (!__initialized)
+            try
             {
-                if (initializeOpenCLDevices() == 0)
+                if (!__initialized)
                 {
-                    CV_Error(Error::OpenCLInitError, "OpenCL not available");
+                    if (initializeOpenCLDevices() == 0)
+                    {
+                        CV_Error(Error::OpenCLInitError, "OpenCL not available");
+                    }
                 }
+                if (!__deviceSelected)
+                {
+                    if (!selectOpenCLDevice())
+                    {
+                        CV_Error(Error::OpenCLInitError, "Can't select OpenCL device");
+                    }
+                }
+                defaultInitiaization = true;
             }
-            if (!__deviceSelected)
+            catch (...)
             {
-                if (!selectOpenCLDevice())
-                {
-                    CV_Error(Error::OpenCLInitError, "Can't select OpenCL device");
-                }
+                defaultInitiaization = true;
+                throw;
             }
         }
         CV_Assert(currentContext != NULL);
@@ -572,6 +594,8 @@ bool ContextImpl::supportsFeature(FEATURE_TYPE featureType) const
 {
     switch (featureType)
     {
+    case FEATURE_CL_INTEL_DEVICE:
+        return deviceInfo.isIntelDevice;
     case FEATURE_CL_DOUBLE:
         return deviceInfo.haveDoubleSupport;
     case FEATURE_CL_UNIFIED_MEM:
@@ -643,8 +667,11 @@ void ContextImpl::setContext(const DeviceInfo* deviceInfo)
     cl_context_properties cps[3] = { CL_CONTEXT_PLATFORM, (cl_context_properties)(infoImpl.platform_id), 0 };
     cl_context clContext = clCreateContext(cps, 1, &infoImpl.device_id, NULL, NULL, &status);
     openCLVerifyCall(status);
-    // TODO add CL_QUEUE_PROFILING_ENABLE
+#ifdef PRINT_KERNEL_RUN_TIME
+    cl_command_queue clCmdQueue = clCreateCommandQueue(clContext, infoImpl.device_id, CL_QUEUE_PROFILING_ENABLE, &status);
+#else /*PRINT_KERNEL_RUN_TIME*/
     cl_command_queue clCmdQueue = clCreateCommandQueue(clContext, infoImpl.device_id, 0, &status);
+#endif /*PRINT_KERNEL_RUN_TIME*/
     openCLVerifyCall(status);
 
     ContextImpl* ctx = new ContextImpl(infoImpl.info, infoImpl.device_id);
@@ -726,10 +753,16 @@ int getOpenCLDevices(std::vector<const DeviceInfo*> &devices, int deviceType, co
 
 void setDevice(const DeviceInfo* info)
 {
-    if (!__deviceSelected)
+    try
+    {
+        ContextImpl::setContext(info);
         __deviceSelected = true;
-
-    ContextImpl::setContext(info);
+    }
+    catch (...)
+    {
+        __deviceSelected = true;
+        throw;
+    }
 }
 
 bool supportsFeature(FEATURE_TYPE featureType)
@@ -756,6 +789,9 @@ __Module::~__Module()
 
 
 #if defined(WIN32) && defined(CVAPI_EXPORTS)
+
+extern "C"
+BOOL WINAPI DllMain(HINSTANCE /*hInst*/, DWORD fdwReason, LPVOID lpReserved);
 
 extern "C"
 BOOL WINAPI DllMain(HINSTANCE /*hInst*/, DWORD fdwReason, LPVOID lpReserved)

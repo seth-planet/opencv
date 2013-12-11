@@ -562,7 +562,10 @@ class TestSuite(object):
             else:
                 hw = ""
             tstamp = timestamp.strftime("%Y%m%d-%H%M%S")
-            return "%s_%s_%s_%s%s%s.xml" % (app, self.targetos, self.targetarch, hw, rev, tstamp)
+            lname = "%s_%s_%s_%s%s%s.xml" % (app, self.targetos, self.targetarch, hw, rev, tstamp)
+            lname = str.replace(lname, '(', '_')
+            lname = str.replace(lname, ')', '_')
+            return lname
 
     def getTest(self, name):
         # full path
@@ -759,7 +762,10 @@ class TestSuite(object):
                 return hostlogpath
             return None
         elif path == "java":
-            cmd = [self.ant_executable, "-DjavaLibraryPath=" + self.tests_dir, "buildAndTest"]
+            cmd = [self.ant_executable,
+                   "-Dopencv.build.type="
+                     + (self.options.configuration if self.options.configuration else self.build_type),
+                   "buildAndTest"]
 
             print >> _stderr, "Run command:", " ".join(cmd)
             try:

@@ -42,17 +42,39 @@
 
 #include "test_precomp.hpp"
 
-#define DUMP_INFO_STDOUT(propertyDisplayName, propertyValue) \
+#define DUMP_PROPERTY_XML(propertyName, propertyValue) \
     do { \
-        std::cout << (propertyDisplayName) << ": " << (propertyValue) << std::endl; \
+        std::stringstream ssName, ssValue;\
+        ssName << propertyName;\
+        ssValue << propertyValue; \
+        ::testing::Test::RecordProperty(ssName.str(), ssValue.str()); \
     } while (false)
 
-#define DUMP_INFO_XML(propertyXMLName, propertyValue) \
+#define DUMP_MESSAGE_STDOUT(msg) \
     do { \
-        std::stringstream ss; ss << propertyValue; \
-        ::testing::Test::RecordProperty((propertyXMLName), ss.str()); \
+        std::cout << msg << std::endl; \
     } while (false)
 
 #include "opencv2/ocl/private/opencl_dumpinfo.hpp"
 
-CV_TEST_MAIN(".", dumpOpenCLDevice())
+int LOOP_TIMES = 1;
+
+void readLoopTimes(int argc, char ** argv)
+{
+    const char * const command_line_keys =
+            "{   test_loop_times             |1        |count of iterations per each test}"
+            "{h  help                        |false    |print help info}";
+
+    cv::CommandLineParser parser(argc, argv, command_line_keys);
+    if (parser.has("help"))
+    {
+        std::cout << "\nAvailable options besides google test option: \n";
+        parser.printMessage();
+    }
+
+    LOOP_TIMES = parser.get<int>("test_loop_times");
+    CV_Assert(LOOP_TIMES > 0);
+}
+
+CV_TEST_MAIN(".", dumpOpenCLDevice(),
+                  readLoopTimes(argc, argv))
